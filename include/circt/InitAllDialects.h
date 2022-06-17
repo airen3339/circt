@@ -20,6 +20,7 @@
 #include "circt/Dialect/FIRRTL/CHIRRTLDialect.h"
 #include "circt/Dialect/FIRRTL/FIRRTLDialect.h"
 #include "circt/Dialect/FSM/FSMOps.h"
+#include "circt/Dialect/GAA/GAADialect.h"
 #include "circt/Dialect/HW/HWDialect.h"
 #include "circt/Dialect/Handshake/HandshakeDialect.h"
 #include "circt/Dialect/LLHD/IR/LLHDDialect.h"
@@ -42,6 +43,7 @@ inline void registerAllDialects(mlir::DialectRegistry &registry) {
     esi::ESIDialect,
     firrtl::FIRRTLDialect,
     fsm::FSMDialect,
+    gaa::GAADialect,
     handshake::HandshakeDialect,
     llhd::LLHDDialect,
     msft::MSFTDialect,
