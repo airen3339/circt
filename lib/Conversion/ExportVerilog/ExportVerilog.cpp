@@ -3014,6 +3014,9 @@ private:
                             const SmallPtrSetImpl<Operation *> &locationOps,
                             StringRef multiLineComment = StringRef());
 
+  LogicalResult visitSV(DPIImportOp op);
+  LogicalResult visitSV(DPICallOp op);
+
 public:
   ModuleEmitter &emitter;
 
@@ -3093,6 +3096,9 @@ LogicalResult StmtEmitter::visitSV(AssignOp op) {
 }
 
 LogicalResult StmtEmitter::visitSV(BPAssignOp op) {
+  if (dyn_cast_or_null<DPICallOp>(op.getSrc().getDefiningOp()))
+    return success();
+
   // If the assign is emitted into logic declaration, we must not emit again.
   if (emitter.assignsInlined.count(op))
     return success();
@@ -4243,6 +4249,82 @@ LogicalResult StmtEmitter::visitSV(AssignInterfaceSignalOp op) {
   return success();
 }
 
+LogicalResult StmtEmitter::visitSV(DPIImportOp op) {
+  startStatement();
+
+  ps << "import \"DPI-C\" function void ";
+  ps << PPExtString(getSymOpName(op));
+  ps << "(";
+
+  ps.scopedBox(PP::bbox2, [&]() {
+    bool needsComma = false;
+    auto printArg = [&](StringRef kind, Attribute name, Type ty) {
+      if (needsComma)
+        ps << ",";
+      ps << PP::newline << kind << " ";
+
+      // Emit the type.
+      {
+        SmallString<8> typeString;
+        llvm::raw_svector_ostream stringStream(typeString);
+        emitter.printPackedType(stripUnpackedTypes(ty), stringStream,
+                                op->getLoc());
+        if (!typeString.empty())
+          ps << typeString;
+      }
+
+      ps << " " << PPExtString(name.cast<StringAttr>().getValue());
+
+      // Print out any array subscripts or other post-name stuff.
+      ps.invokeWithStringOS(
+          [&](auto &os) { emitter.printUnpackedTypePostfix(ty, os); });
+      needsComma = true;
+    };
+
+    for (const auto &[name, ty] :
+         llvm::zip(op.getArgNames(), op.getArgumentTypes()))
+      printArg("input ", name, ty);
+    for (const auto &[name, ty] :
+         llvm::zip(op.getResultNames(), op.getResultTypes()))
+      printArg("output", name, ty);
+  });
+
+  ps << PP::newline << ");" << PP::newline;
+  setPendingNewline();
+  return success();
+}
+
+LogicalResult StmtEmitter::visitSV(DPICallOp op) {
+  startStatement();
+
+  auto topModuleOp = op->getParentOfType<ModuleOp>();
+  Operation *callee = topModuleOp.lookupSymbol(op.getCallee());
+
+  ps << PPExtString(getSymOpName(callee)) << "(";
+
+  SmallPtrSet<Operation *, 8> ops;
+  ops.insert(op);
+
+  bool needsComma = false;
+  auto printArg = [&](Value value) {
+    if (needsComma)
+      ps << "," << PP::space;
+    emitExpression(value, ops);
+    needsComma = true;
+  };
+
+  ps.scopedBox(PP::ibox0, [&] {
+    for (Value arg : op.getArgs())
+      printArg(arg);
+    for (Value result : op.getResults())
+      printArg(result.getUsers().begin()->getOperand(0));
+  });
+
+  ps << ");";
+  emitLocationInfoAndNewLine(ops);
+  return success();
+}
+
 void StmtEmitter::emitStatement(Operation *op) {
   // Expressions may either be ignored or emitted as an expression statements.
   if (isVerilogExpression(op))
@@ -5101,7 +5183,7 @@ void SharedEmitterState::gatherFiles(bool separateModules) {
           else
             rootFile.ops.push_back(info);
         })
-        .Case<VerbatimOp, IfDefOp>([&](Operation *op) {
+        .Case<VerbatimOp, IfDefOp, DPIImportOp>([&](Operation *op) {
           // Emit into a separate file using the specified file name or
           // replicate the operation in each outputfile.
           if (!attr) {
@@ -5198,7 +5280,7 @@ static void emitOperation(VerilogEmitterState &state, Operation *op) {
       .Case<BindOp>([&](auto op) { ModuleEmitter(state).emitBind(op); })
       .Case<BindInterfaceOp>(
           [&](auto op) { ModuleEmitter(state).emitBindInterface(op); })
-      .Case<InterfaceOp, VerbatimOp, IfDefOp>(
+      .Case<InterfaceOp, VerbatimOp, IfDefOp, DPIImportOp>(
           [&](auto op) { ModuleEmitter(state).emitStatement(op); })
       .Case<TypeScopeOp>([&](auto typedecls) {
         ModuleEmitter(state).emitStatement(typedecls);
