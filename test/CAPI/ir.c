@@ -11,6 +11,7 @@
  */
 
 #include "mlir-c/IR.h"
+#include "circt-c/Dialect/FIRRTL.h"
 #include "circt-c/Dialect/HW.h"
 #include "circt-c/Dialect/Seq.h"
 #include "mlir-c/AffineExpr.h"
@@ -123,6 +124,91 @@ int testHWTypes() {
   return 0;
 }
 
+MlirOperation parseFirrtlOp(MlirContext ctx, const char *str) {
+  MlirStringRef srcName = mlirStringRefCreateFromCString("none");
+  MlirStringRef srcStr = mlirStringRefCreateFromCString(str);
+  return mlirOperationCreateParse(ctx, srcStr, srcName);
+}
+
+bool testFIRRTLUInt(MlirContext ctx) {
+  MlirOperation op =
+      parseFirrtlOp(ctx, "%res = firrtl.wire : !firrtl.uint<32>");
+  MlirValue val = mlirOperationGetResult(op, 0);
+  MlirType ty = mlirValueGetType(val);
+  bool isUInt = firrtlTypeIsUInt(ty);
+  int width = firrtlTypeGetBitWidth(ty, false);
+  mlirOperationDestroy(op);
+  return (isUInt && (width == 32));
+}
+
+bool testFIRRTLBundle(MlirContext ctx) {
+  MlirOperation op = parseFirrtlOp(
+      ctx,
+      "%res = firrtl.wire : !firrtl.bundle<foo: uint<32>, bar flip: sint<32>>");
+  MlirValue val = mlirOperationGetResult(op, 0);
+  MlirType ty = mlirValueGetType(val);
+  bool isBundle = firrtlTypeIsBundle(ty);
+  int numFields = firrtlTypeBundleGetNumFields(ty);
+
+  bool fieldFooExists =
+      firrtlTypeBundleHasFieldName(ty, mlirStringRefCreateFromCString("foo"));
+  bool fieldBarExists =
+      firrtlTypeBundleHasFieldName(ty, mlirStringRefCreateFromCString("bar"));
+  bool fieldBazExists =
+      firrtlTypeBundleHasFieldName(ty, mlirStringRefCreateFromCString("baz"));
+  bool namesOk = (fieldFooExists && fieldBarExists && !fieldBazExists);
+
+  FirrtlBundleField fieldFoo = firrtlTypeBundleGetFieldByIndex(ty, 0);
+  FirrtlBundleField fieldBar =
+      firrtlTypeBundleGetFieldByName(ty, mlirStringRefCreateFromCString("bar"));
+
+  bool fooIsUInt = firrtlTypeIsUInt(fieldFoo.type);
+  int fooWidth = firrtlTypeGetBitWidth(fieldFoo.type, false);
+  bool fooOk = (fooIsUInt && (fooWidth == 32) && (!fieldFoo.isFlip));
+
+  bool barIsSInt = firrtlTypeIsSInt(fieldBar.type);
+  int barWidth = firrtlTypeGetBitWidth(fieldBar.type, false);
+  bool barOk = (barIsSInt && (barWidth == 32) && fieldBar.isFlip);
+
+  mlirOperationDestroy(op);
+
+  return (isBundle && (numFields == 2) && namesOk && fooOk && barOk);
+}
+
+bool testFIRRTLVector(MlirContext ctx) {
+  MlirOperation op =
+      parseFirrtlOp(ctx, "%res = firrtl.wire : !firrtl.vector<uint<32>, 16>");
+  MlirValue val = mlirOperationGetResult(op, 0);
+  MlirType ty = mlirValueGetType(val);
+  bool isVector = firrtlTypeIsFVector(ty);
+  int numElements = firrtlTypeVectorGetNumElements(ty);
+  MlirType elementType = firrtlTypeVectorGetElementType(ty);
+  bool elementIsUInt = firrtlTypeIsUInt(elementType);
+  int elementWidth = firrtlTypeGetBitWidth(elementType, false);
+  mlirOperationDestroy(op);
+
+  return (isVector && (numElements == 16) && elementIsUInt &&
+          (elementWidth == 32));
+}
+
+int testFIRRTLTypes() {
+  MlirContext ctx = mlirContextCreate();
+  MlirDialectHandle firrtlHandle = mlirGetDialectHandle__firrtl__();
+  mlirDialectHandleRegisterDialect(firrtlHandle, ctx);
+  mlirDialectHandleLoadDialect(firrtlHandle, ctx);
+
+  if (!testFIRRTLUInt(ctx))
+    return 1;
+  if (!testFIRRTLBundle(ctx))
+    return 2;
+  if (!testFIRRTLVector(ctx))
+    return 3;
+
+  mlirContextDestroy(ctx);
+
+  return 0;
+}
+
 int main() {
   fprintf(stderr, "@registration\n");
   int errcode = registerOnlyHW();
@@ -130,6 +216,10 @@ int main() {
 
   fprintf(stderr, "@hwtypes\n");
   errcode = testHWTypes();
+  fprintf(stderr, "%d\n", errcode);
+
+  fprintf(stderr, "@firrtltypes\n");
+  errcode = testFIRRTLTypes();
   fprintf(stderr, "%d\n", errcode);
 
   // clang-format off
