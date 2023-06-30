@@ -173,4 +173,9 @@ def HWExportModuleHierarchy : Pass<"hw-export-module-hierarchy",
   let dependentDialects = ["circt::sv::SVDialect"];
 }
 
+def HWDeadCodeElim : Pass<"hw-dead-code-elim", "mlir::ModuleOp"> {
+  let summary = "HW- and SV-specific inter-module dead-code elimination";
+  let constructor = "createHWDeadCodeElimPass()";
+}
+
 #endif // CIRCT_DIALECT_SV_SVPASSES
