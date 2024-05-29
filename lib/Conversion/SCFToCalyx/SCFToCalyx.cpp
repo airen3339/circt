@@ -29,6 +29,7 @@
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include <fstream>
 
 #include <variant>
 
@@ -200,6 +201,14 @@ public:
 /// Iterate through the operations of a source function and instantiate
 /// components or primitives based on the type of the operations.
 class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
+public:
+  BuildOpGroups(MLIRContext *context, LogicalResult &resRef,
+                calyx::PatternApplicationState &patternState,
+                DenseMap<mlir::func::FuncOp, calyx::ComponentOp> &map,
+                calyx::CalyxLoweringState &state,
+                mlir::Pass::Option<bool> &writeJsonOpt)
+      : FuncOpPartialLoweringPattern(context, resRef, patternState, map, state),
+        writeJson(writeJsonOpt) {}
   using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
 
   LogicalResult
@@ -236,10 +245,25 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
                                  : WalkResult::interrupt();
     });
 
+    if (writeJson) {
+      if (auto fileLoc = dyn_cast<mlir::FileLineColLoc>(funcOp->getLoc())) {
+        std::filesystem::path path(fileLoc.getFilename().str());
+        auto outFileName = path.parent_path().append("data.json");
+        std::ofstream outFile(outFileName);
+
+        if (outFile.is_open()) {
+          outFile << getState<ComponentLoweringState>().getExtMemData().dump(2);
+          outFile.close();
+        } else
+          llvm::errs() << "Unable to open file for writing\n";
+      }
+    }
+
     return success(opBuiltSuccessfully);
   }
 
 private:
+  mlir::Pass::Option<bool> &writeJson;
   /// Op builder specializations.
   LogicalResult buildOp(PatternRewriter &rewriter, scf::YieldOp yieldOp) const;
   LogicalResult buildOp(PatternRewriter &rewriter,
@@ -1798,7 +1822,7 @@ void SCFToCalyxPass::runOnOperation() {
   /// having a distinct group for each operation, groups are analogous to SSA
   /// values in the source program.
   addOncePattern<BuildOpGroups>(loweringPatterns, patternState, funcMap,
-                                *loweringState);
+                                *loweringState, writeJsonOpt);
 
   /// This pattern traverses the CFG of the program and generates a control
   /// schedule based on the calyx::GroupOp's which were registered for each
