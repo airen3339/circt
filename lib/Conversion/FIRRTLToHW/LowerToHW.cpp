@@ -1633,6 +1633,8 @@ struct FIRRTLLowering : public FIRRTLVisitor<FIRRTLLowering, LogicalResult> {
   LogicalResult visitStmt(VerifCoverIntrinsicOp op);
   LogicalResult visitExpr(HasBeenResetIntrinsicOp op);
   LogicalResult visitStmt(UnclockedAssumeIntrinsicOp op);
+  LogicalResult visitExpr(FOpenIntrinsicOp op);
+  LogicalResult visitExpr(FCloseIntrinsicOp op);
 
   // Other Operations
   LogicalResult visitExpr(BitsPrimOp op);
@@ -4333,7 +4335,8 @@ LogicalResult FIRRTLLowering::visitStmt(RefReleaseInitialOp op) {
 LogicalResult FIRRTLLowering::visitStmt(PrintFOp op) {
   auto clock = getLoweredNonClockValue(op.getClock());
   auto cond = getLoweredValue(op.getCond());
-  if (!clock || !cond)
+  auto fd = getLoweredValue(op.getFd());
+  if (!clock || !cond || !fd)
     return failure();
 
   SmallVector<Value, 4> operands;
@@ -4358,9 +4361,7 @@ LogicalResult FIRRTLLowering::visitStmt(PrintFOp op) {
       ifCond = builder.createOrFold<comb::AndOp>(ifCond, cond, true);
 
       addIfProceduralBlock(ifCond, [&]() {
-        // Emit the sv.fwrite, writing to stderr by default.
-        Value fdStderr = builder.create<hw::ConstantOp>(APInt(32, 0x80000002));
-        builder.create<sv::FWriteOp>(fdStderr, op.getFormatString(), operands);
+        builder.create<sv::FWriteOp>(fd, op.getFormatString(), operands);
       });
     });
   });
@@ -4667,6 +4668,26 @@ LogicalResult FIRRTLLowering::visitStmt(UnclockedAssumeIntrinsicOp op) {
                 assumeLabel, op.getMessageAttr(), messageOps);
         });
   });
+}
+
+LogicalResult FIRRTLLowering::visitExpr(FOpenIntrinsicOp op) {
+  auto resultTy = lowerType(op.getType());
+  if (!resultTy)
+    return failure();
+
+  auto filename = builder.create<sv::ConstantStrOp>(op.getFilename());
+  auto mode = builder.create<sv::ConstantStrOp>(op.getMode());
+
+  return setLoweringTo<sv::SystemFunctionOp>(
+      op, resultTy, builder.getStringAttr("fopen"), ValueRange{filename, mode});
+}
+
+LogicalResult FIRRTLLowering::visitExpr(FCloseIntrinsicOp op) {
+  auto fd = getLoweredValue(op.getFd());
+  auto result = builder.create<sv::SystemFunctionOp>(
+      NoneType::get(builder.getContext()), builder.getStringAttr("fclose"),
+      ValueRange{fd});
+  return success();
 }
 
 LogicalResult FIRRTLLowering::visitStmt(AttachOp op) {
