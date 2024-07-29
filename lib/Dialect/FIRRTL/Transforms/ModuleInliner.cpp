@@ -574,7 +574,6 @@ private:
   /// Returns true if the operation is annotated to be inlined.
   bool shouldInline(Operation *op);
 
-  
   /// Check not inlining into anything other than layer or module.
   /// In the future, could check this per-inlined-operation.
   LogicalResult checkInstanceParents(InstanceOp instance);
@@ -1027,7 +1026,8 @@ LogicalResult Inliner::inliningWalk(
               return success();
             })
             .Default([&](Operation *op) {
-              return op->emitError("unsupported operation cannot be inlined");
+              return op->emitError("unsupported operation '")
+                     << op->getName() << "' cannot be inlined";
             });
     if (failed(result))
       return failure();
@@ -1040,8 +1040,9 @@ LogicalResult Inliner::checkInstanceParents(InstanceOp instance) {
   while (!isa<FModuleLike>(parent)) {
     if (!isa<LayerBlockOp>(parent))
       return instance->emitError("cannot inline instance")
-        .attachNote(parent->getLoc())
-        << "containing operation not safe to inline into";
+                 .attachNote(parent->getLoc())
+             << "containing operation '" << parent->getName()
+             << "' not safe to inline into";
     parent = parent->getParentOp();
   }
   return success();

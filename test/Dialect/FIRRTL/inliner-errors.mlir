@@ -5,7 +5,7 @@
 firrtl.circuit "InlineIntoWhen" {
   firrtl.module private @Child () attributes {annotations = [{class = "firrtl.passes.InlineAnnotation"}]} {}
   firrtl.module @InlineIntoWhen(in %cond : !firrtl.uint<1>) {
-    // expected-note @below {{containing operation not safe to inline into}}
+    // expected-note @below {{containing operation 'firrtl.when' not safe to inline into}}
     firrtl.when %cond : !firrtl.uint<1> {
       // expected-error @below {{cannot inline instance}}
       firrtl.instance c @Child()
@@ -20,7 +20,7 @@ firrtl.circuit "InlineIntoWhen" {
 firrtl.circuit "FlattenThroughWhen" {
   firrtl.module private @GChild () {}
   firrtl.module private @Child (in %cond : !firrtl.uint<1>) {
-    // expected-note @below {{containing operation not safe to inline into}}
+    // expected-note @below {{containing operation 'firrtl.when' not safe to inline into}}
     firrtl.when %cond : !firrtl.uint<1> {
       // expected-error @below {{cannot inline instance}}
       firrtl.instance c @GChild()
@@ -40,7 +40,7 @@ firrtl.circuit "InlineIntoIfdef" {
   sv.macro.decl @A_0["A"]
   firrtl.module private @Child () attributes {annotations = [{class = "firrtl.passes.InlineAnnotation"}]} {}
   firrtl.module @InlineIntoIfdef() {
-    // expected-note @below {{containing operation not safe to inline into}}
+    // expected-note @below {{containing operation 'sv.ifdef' not safe to inline into}}
     sv.ifdef @A_0 {
       // expected-error @below {{cannot inline instance}}
       firrtl.instance c @Child()
@@ -55,7 +55,7 @@ firrtl.circuit "InlineIntoIfdef" {
 firrtl.circuit "InlineIfdef" {
   sv.macro.decl @A_0["A"]
   firrtl.module private @Child () attributes {annotations = [{class = "firrtl.passes.InlineAnnotation"}]} {
-    // expected-error @below {{unsupported operation cannot be inlined}}
+    // expected-error @below {{unsupported operation 'sv.ifdef' cannot be inlined}}
     sv.ifdef @A_0 { }
   }
   firrtl.module @InlineIfdef() {
