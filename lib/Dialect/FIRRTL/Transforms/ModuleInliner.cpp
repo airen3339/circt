@@ -574,6 +574,11 @@ private:
   /// Returns true if the operation is annotated to be inlined.
   bool shouldInline(Operation *op);
 
+  
+  /// Check not inlining into anything other than layer or module.
+  /// In the future, could check this per-inlined-operation.
+  LogicalResult checkInstanceParents(InstanceOp instance);
+
   /// Walk the specified block, invoking `process` for operations visited
   /// forward+pre-order.  Handles cloning supported operations with regions,
   /// so that `process` is only invoked on regionless operations.
@@ -1030,6 +1035,18 @@ LogicalResult Inliner::inliningWalk(
   return success();
 }
 
+LogicalResult Inliner::checkInstanceParents(InstanceOp instance) {
+  auto *parent = instance->getParentOp();
+  while (!isa<FModuleLike>(parent)) {
+    if (!isa<LayerBlockOp>(parent))
+      return instance->emitError("cannot inline instance")
+        .attachNote(parent->getLoc())
+        << "containing operation not safe to inline into";
+    parent = parent->getParentOp();
+  }
+  return success();
+}
+
 // NOLINTNEXTLINE(misc-no-recursion)
 LogicalResult Inliner::flattenInto(StringRef prefix, InliningLevel &il,
                                    IRMapping &mapper,
@@ -1059,6 +1076,9 @@ LogicalResult Inliner::flattenInto(StringRef prefix, InliningLevel &il,
           cloneAndRename(prefix, il, mapper, *op, symbolRenames, localSymbols);
           return success();
         }
+
+        if (failed(checkInstanceParents(instance)))
+          return failure();
 
         // Add any NLAs which start at this instance to the localSymbols set.
         // Anything in this set will be made local during the recursive
@@ -1102,17 +1122,8 @@ LogicalResult Inliner::flattenInstances(FModuleOp module) {
 
         // Check not inlining into anything other than layer or module.
         // In the future, could check this per-inlined-operation.
-        {
-          auto *parent = instance->getParentOp();
-          while (!isa<FModuleLike>(parent)) {
-            if (!isa<LayerBlockOp>(parent))
-              return instance->emitError("cannot inline instance")
-                             .attachNote(parent->getLoc())
-                         << "containing operation not safe to flatten into",
-                     WalkResult::interrupt();
-            parent = parent->getParentOp();
-          }
-        }
+        if (failed(checkInstanceParents(instance)))
+          return WalkResult::interrupt();
 
         if (auto instSym = getInnerSymName(instance)) {
           auto innerRef = InnerRefAttr::get(moduleName, instSym);
@@ -1198,6 +1209,9 @@ Inliner::inlineInto(StringRef prefix, InliningLevel &il, IRMapping &mapper,
           cloneAndRename(prefix, il, mapper, *op, symbolRenames, {});
           return success();
         }
+
+        if (failed(checkInstanceParents(instance)))
+          return failure();
 
         auto toBeFlattened = shouldFlatten(childModule);
         if (auto instSym = getInnerSymName(instance)) {
@@ -1294,19 +1308,8 @@ LogicalResult Inliner::inlineInstances(FModuleOp module) {
           return WalkResult::advance();
         }
 
-        // Check not inlining into anything other than layer or module.
-        // In the future, could check this per-inlined-operation.
-        {
-          auto *parent = instance->getParentOp();
-          while (!isa<FModuleLike>(parent)) {
-            if (!isa<LayerBlockOp>(parent))
-              return instance->emitError("cannot inline instance")
-                             .attachNote(parent->getLoc())
-                         << "containing operation not safe to inline into",
-                     WalkResult::interrupt();
-            parent = parent->getParentOp();
-          }
-        }
+        if (failed(checkInstanceParents(instance)))
+          return WalkResult::interrupt();
 
         auto toBeFlattened = shouldFlatten(target);
         if (auto instSym = getInnerSymName(instance)) {

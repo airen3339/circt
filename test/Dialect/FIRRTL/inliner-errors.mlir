@@ -15,6 +15,25 @@ firrtl.circuit "InlineIntoWhen" {
 
 // -----
 
+// Reject flattening through when (run ExpandWhens first).
+
+firrtl.circuit "FlattenThroughWhen" {
+  firrtl.module private @GChild () {}
+  firrtl.module private @Child (in %cond : !firrtl.uint<1>) {
+    // expected-note @below {{containing operation not safe to inline into}}
+    firrtl.when %cond : !firrtl.uint<1> {
+      // expected-error @below {{cannot inline instance}}
+      firrtl.instance c @GChild()
+    }
+  }
+  firrtl.module @FlattenThroughWhen(in %cond : !firrtl.uint<1>) attributes {annotations = [{class = "firrtl.transforms.FlattenAnnotation"}]} {
+    %c_cond = firrtl.instance c @Child(in cond : !firrtl.uint<1>)
+    firrtl.matchingconnect %c_cond, %cond : !firrtl.uint<1>
+  }
+}
+
+// -----
+
 // Reject inlining into unrecognized operations.
 
 firrtl.circuit "InlineIntoIfdef" {
