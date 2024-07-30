@@ -27,13 +27,6 @@ endmodule
 
 // -----
 module Foo;
-  parameter a = 1;
-  // expected-error @below {{unsupported construct}}
-  defparam a = 2;
-endmodule
-
-// -----
-module Foo;
   // expected-error @below {{unsupported construct}}
   nettype real x;
 endmodule

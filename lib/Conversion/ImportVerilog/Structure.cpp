@@ -192,6 +192,9 @@ struct ModuleVisitor : public BaseVisitor {
     return success();
   }
 
+  // Skip defparam.
+  LogicalResult visit(const slang::ast::DefParamSymbol &) { return success(); }
+
   // Handle instances.
   LogicalResult visit(const slang::ast::InstanceSymbol &instNode) {
     using slang::ast::ArgumentDirection;
@@ -549,19 +552,20 @@ LogicalResult Context::convertCompilation() {
   }
 
   // Prime the root definition worklist by adding all the top-level modules.
-  SmallVector<const slang::ast::InstanceSymbol *> topInstances;
-  for (auto *inst : root.topInstances)
+  for (auto *inst : root.topInstances) {
+    ValueSymbolScope scope(valueSymbols);
+
     if (!convertModuleHeader(&inst->body))
       return failure();
 
-  // Convert all the root module definitions.
-  while (!moduleWorklist.empty()) {
-    auto *module = moduleWorklist.front();
-    moduleWorklist.pop();
-    if (failed(convertModuleBody(module)))
-      return failure();
+    // Convert all the root module definitions.
+    while (!moduleWorklist.empty()) {
+      auto *module = moduleWorklist.front();
+      moduleWorklist.pop();
+      if (failed(convertModuleBody(module)))
+        return failure();
+    }
   }
-
   return success();
 }
 
@@ -722,7 +726,6 @@ Context::convertModuleBody(const slang::ast::InstanceBodySymbol *module) {
   builder.setInsertionPointToEnd(lowering.op.getBody());
 
   // Convert the body of the module.
-  ValueSymbolScope scope(valueSymbols);
   for (auto &member : module->members()) {
     auto loc = convertLocation(member.location);
     if (failed(member.visit(ModuleVisitor(*this, loc))))

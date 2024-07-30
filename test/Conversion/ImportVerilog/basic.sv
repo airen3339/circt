@@ -1499,3 +1499,30 @@ function void funcArgs2();
   funcArgs1(42, x, y, z, w);
   // CHECK: return
 endfunction
+
+// CHECK-LABEL: moore.module private @sub()
+module sub;
+  // CHECK: [[TMP1:%.+]] = moore.constant 32 : l32
+  // CHECK: [[PARAM_P:%.+]] = moore.named_constant parameter [[TMP1]] : l32
+  parameter p = 1;
+  typedef enum {ea, eb} MyEnum;
+  logic [7:0] data;
+  initial begin : init
+    logic inner;
+  end
+endmodule
+
+// CHECK-LABEL: moore.module @top()
+module top;
+  sub sub1();
+
+  // CHECK-NOT: defparm
+  defparam sub1.p = 32;
+  // initial begin
+  //   sub1.data = 8'b0;
+  //   sub1.init.inner = 1'b0;
+  // end
+  // assign w0 = sub1.data;
+  // assign w1 = sub1.init.inner;
+  // assign w2 = sub1.ea;
+endmodule
