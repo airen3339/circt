@@ -25,6 +25,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/ValueRange.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LogicalResult.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -107,6 +108,11 @@ struct ForScheduleable {
   uint64_t bound;
 };
 
+struct ParScheduleable {
+  /// Parallel operation to schedule.
+  scf::ParallelOp parOp;
+};
+
 struct CallScheduleable {
   /// Instance for invoking.
   calyx::InstanceOp instanceOp;
@@ -115,8 +121,9 @@ struct CallScheduleable {
 };
 
 /// A variant of types representing scheduleable operations.
-using Scheduleable = std::variant<calyx::GroupOp, WhileScheduleable,
-                                  ForScheduleable, CallScheduleable>;
+using Scheduleable =
+    std::variant<calyx::GroupOp, WhileScheduleable, ForScheduleable,
+                 CallScheduleable, ParScheduleable>;
 
 class WhileLoopLoweringStateInterface
     : calyx::LoopLoweringStateInterface<ScfWhileOp> {
@@ -214,6 +221,7 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
               .template Case<arith::ConstantOp, ReturnOp, BranchOpInterface,
                              /// SCF
                              scf::YieldOp, scf::WhileOp, scf::ForOp,
+                             scf::ReduceOp, scf::ParallelOp,
                              /// memref
                              memref::AllocOp, memref::AllocaOp, memref::LoadOp,
                              memref::StoreOp,
@@ -241,6 +249,10 @@ class BuildOpGroups : public calyx::FuncOpPartialLoweringPattern {
 
 private:
   /// Op builder specializations.
+  LogicalResult buildOp(PatternRewriter &rewriter,
+                        scf::ReduceOp reduceOp) const;
+  LogicalResult buildOp(PatternRewriter &rewriter,
+                        scf::ParallelOp parallelOp) const;
   LogicalResult buildOp(PatternRewriter &rewriter, scf::YieldOp yieldOp) const;
   LogicalResult buildOp(PatternRewriter &rewriter,
                         BranchOpInterface brOp) const;
@@ -643,6 +655,18 @@ LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
                                      memref::AllocaOp allocOp) const {
   return buildAllocOp(getState<ComponentLoweringState>(), rewriter, allocOp);
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     scf::ReduceOp reduceOp) const {
+  return success();
+}
+
+LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
+                                     scf::ParallelOp parOp) const {
+  getState<ComponentLoweringState>().addBlockScheduleable(
+      parOp.getOperation()->getBlock(), ParScheduleable{parOp});
+  return success();
 }
 
 LogicalResult BuildOpGroups::buildOp(PatternRewriter &rewriter,
@@ -1291,6 +1315,225 @@ class BuildForGroups : public calyx::FuncOpPartialLoweringPattern {
   }
 };
 
+class BuildParGroups : public calyx::FuncOpPartialLoweringPattern {
+  using FuncOpPartialLoweringPattern::FuncOpPartialLoweringPattern;
+  LogicalResult
+  partiallyLowerFuncToComp(FuncOp funcOp,
+                           PatternRewriter &rewriter) const override {
+    LogicalResult res = success();
+    int parOpCnt = 0;
+    funcOp.walk([&](Operation *op) {
+      if (!isa<scf::ParallelOp>(op))
+        return WalkResult::advance();
+
+      auto scfParOp = cast<scf::ParallelOp>(op);
+      mlir::ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
+      auto inductVars = scfParOp.getInductionVars();
+      // Create a totalNumSteps by numLoops 2-D vector
+      auto [lowerBounds, upperBounds, steps] = getLoopBounds(scfParOp);
+      auto accessIndices =
+          generateAccessIndices(lowerBounds, upperBounds, steps);
+
+      // parentBlock will be used to insert induct variable constants
+      auto *parentBlock = scfParOp.getOperation()->getBlock();
+      // Number of parallel executed regions equals the number of combinations,
+      // equals the number of newly created FuncOps
+      SmallVector<FuncOp, 4> parFuncs;
+      SmallVector<SmallVector<Value, 4>, 4> operandsToParFuncs;
+      for (size_t idx = 0; idx < accessIndices.size(); idx++) {
+        DenseMap<BlockArgument, arith::ConstantIndexOp> blockArgConsts;
+        DenseSet<Value> seenOperands;
+        SmallVector<Value, 4> currInductOperands;
+        SmallVector<int, 4> argNumMap;
+        SmallVector<Type, 4> operandTypes;
+        // Get all the induction vars
+        scfParOp.walk([&](mlir::Operation *innerOp) {
+          if (isa<scf::ParallelOp>(innerOp) || isa<scf::ReduceOp>(innerOp))
+            return WalkResult::advance();
+
+          for (auto operand : innerOp->getOperands()) {
+            bool isInductVar = std::find(inductVars.begin(), inductVars.end(),
+                                         operand) != inductVars.end();
+            bool isDefinedOutside =
+                isDefinedOutsideRegion(operand, &scfParOp->getRegion(0));
+            if (!isInductVar && !isDefinedOutside)
+              continue;
+
+            if (seenOperands.insert(operand).second) {
+              if (isInductVar) {
+                auto blockArg = cast<BlockArgument>(operand);
+                int inductValue = accessIndices[idx][blockArg.getArgNumber()];
+                rewriter.setInsertionPointToStart(parentBlock);
+                auto indexOp = rewriter.create<arith::ConstantIndexOp>(
+                    scfParOp.getLoc(), inductValue);
+                blockArgConsts[blockArg] = indexOp;
+                auto indexVal = indexOp.getResult();
+                currInductOperands.push_back(indexVal);
+                operandTypes.push_back(indexOp.getType());
+                operandTypes.push_back(operand.getType());
+              }
+              argNumMap.push_back(currInductOperands.size() - 1);
+            } else {
+              Value indexVal = operand;
+              if (isInductVar) {
+                auto blockArg = cast<BlockArgument>(operand);
+                indexVal = blockArgConsts[blockArg].getResult();
+              }
+              auto *it = std::find(currInductOperands.begin(),
+                                   currInductOperands.end(), indexVal);
+              if (it != currInductOperands.end()) {
+                int index = std::distance(currInductOperands.begin(), it);
+                argNumMap.push_back(index);
+              } else
+                llvm_unreachable("Operand not found!");
+            }
+          }
+          return WalkResult::advance();
+        });
+
+        rewriter.setInsertionPointToEnd(&moduleOp.getBodyRegion().back());
+        FunctionType parFuncType = rewriter.getFunctionType(
+            operandTypes, {}); // TODO: return type is empty for now, need
+                               // change for `reduce.return`
+        auto parFuncOp = rewriter.create<FuncOp>(
+            scfParOp.getLoc(),
+            llvm::join_items("_",
+                             ""
+                             "par_func",
+                             std::to_string(parOpCnt), std::to_string(idx)),
+            parFuncType);
+        parFuncOp.addEntryBlock();
+
+        int mapCnt = 0;
+        DenseMap<Operation *, Operation *> cloneMapping;
+        for (auto &innerOp : scfParOp.getOps()) {
+          if (isa<scf::ReduceOp>(innerOp))
+            continue;
+
+          mlir::IRMapping mapping;
+          innerOp.walk([&](Operation *nestedOp) {
+            for (auto &opOperand : nestedOp->getOpOperands()) {
+              auto nestedOperand =
+                  nestedOp->getOperand(opOperand.getOperandNumber());
+              if (std::find(inductVars.begin(), inductVars.end(),
+                            nestedOperand) != inductVars.end() ||
+                  isDefinedOutsideRegion(nestedOperand,
+                                         &scfParOp->getRegion(0)))
+                mapping.map(nestedOperand, parFuncOp.getBody().getArgument(
+                                               argNumMap[mapCnt++]));
+              else {
+                if (auto blkArgOp = dyn_cast<BlockArgument>(nestedOperand)) {
+                  if (blkArgOp.getOwner()->getParentOp() != scfParOp)
+                    continue; // seems like `rewriter.clone` takes care of the
+                              // nested cloning
+                } else if (nestedOperand.getDefiningOp()->getParentOp() !=
+                           scfParOp)
+                  continue; // same reason as above
+                auto *clonedOp = cloneMapping[nestedOperand.getDefiningOp()];
+                mapping.map(nestedOperand,
+                            clonedOp->getResult(0)); // TODO: fix it
+              }
+            }
+            return WalkResult::advance();
+          });
+          rewriter.setInsertionPointToEnd(&parFuncOp.getBody().front());
+          auto *clonedOp = rewriter.clone(innerOp, mapping);
+          cloneMapping[&innerOp] = clonedOp;
+        }
+        parFuncs.push_back(parFuncOp);
+        operandsToParFuncs.push_back(currInductOperands);
+      }
+
+      for (auto &op : llvm::make_early_inc_range(scfParOp.getOps())) {
+        op.dropAllDefinedValueUses();
+        op.erase();
+      }
+
+      rewriter.setInsertionPointToEnd(
+          &(*scfParOp->getRegion(0).getBlocks().begin()));
+      for (size_t i = 0; i < accessIndices.size(); i++) {
+        auto parFunc = parFuncs[i];
+        auto parFuncOperands = operandsToParFuncs[i];
+        rewriter.create<func::CallOp>(parFunc.getLoc(), parFunc,
+                                      parFuncOperands);
+      }
+      parOpCnt++;
+
+      return WalkResult::advance();
+    });
+    return res;
+  }
+
+private:
+  using LoopBounds =
+      std::tuple<SmallVector<int64_t, 4>, SmallVector<int64_t, 4>,
+                 SmallVector<int64_t, 4>>;
+
+  bool isDefinedOutsideRegion(Value value, Region *targetRegion) const {
+    Operation *definingOp = value.getDefiningOp();
+    if (!definingOp) {
+      Block *block = cast<BlockArgument>(value).getOwner();
+      Operation *parentOp = block->getParentOp();
+      while (parentOp) {
+        if (parentOp->getParentRegion() == targetRegion) {
+          return false;
+        }
+        parentOp = parentOp->getParentOp();
+      }
+      return true;
+    }
+
+    Operation *parentOp = definingOp;
+    while (parentOp) {
+      if (parentOp->getParentRegion() == targetRegion) {
+        return false;
+      }
+      parentOp = parentOp->getParentOp();
+    }
+
+    return true;
+  }
+
+  int64_t getConstantIntValue(Value val) const {
+    return cast<IntegerAttr>(
+               cast<arith::ConstantOp>(val.getDefiningOp()).getValue())
+        .getInt();
+  }
+
+  LoopBounds getLoopBounds(scf::ParallelOp scfParOp) const {
+    SmallVector<int64_t, 4> lowerBounds, upperBounds, steps;
+    for (size_t i = 0; i < scfParOp.getNumLoops(); i++) {
+      lowerBounds.push_back(getConstantIntValue(scfParOp.getLowerBound()[i]));
+      upperBounds.push_back(getConstantIntValue(scfParOp.getUpperBound()[i]));
+      steps.push_back(getConstantIntValue(scfParOp.getStep()[i]));
+    }
+    return {lowerBounds, upperBounds, steps};
+  }
+
+  SmallVector<SmallVector<int64_t, 4>, 4>
+  generateAccessIndices(const SmallVector<int64_t, 4> &lowerBounds,
+                        const SmallVector<int64_t, 4> &upperBounds,
+                        const SmallVector<int64_t, 4> &steps) const {
+    SmallVector<SmallVector<int64_t, 4>, 4> accessIndices;
+    auto currIndices = lowerBounds;
+
+    std::function<void(size_t)> generateCombinations = [&](size_t currDim) {
+      if (currDim == lowerBounds.size()) {
+        accessIndices.push_back(currIndices);
+        return;
+      }
+      for (auto s = lowerBounds[currDim]; s < upperBounds[currDim];
+           s += steps[currDim]) {
+        currIndices[currDim] = s;
+        generateCombinations(currDim + 1);
+      }
+    };
+
+    generateCombinations(0);
+    return accessIndices;
+  }
+};
+
 /// Builds a control schedule by traversing the CFG of the function and
 /// associating this with the previously created groups.
 /// For simplicity, the generated control flow is expanded for all possible
@@ -1322,7 +1565,8 @@ private:
         getState<ComponentLoweringState>().getBlockScheduleables(block);
     auto loc = block->front().getLoc();
 
-    if (compBlockScheduleables.size() > 1) {
+    if (compBlockScheduleables.size() > 1 &&
+        !isa<scf::ParallelOp>(block->getParentOp())) {
       auto seqOp = rewriter.create<calyx::SeqOp>(loc);
       parentCtrlBlock = seqOp.getBodyBlock();
     }
@@ -1382,6 +1626,15 @@ private:
             getState<ComponentLoweringState>().getForLoopLatchGroup(forOp);
         rewriter.create<calyx::EnableOp>(forLatchGroup.getLoc(),
                                          forLatchGroup.getName());
+        if (res.failed())
+          return res;
+      } else if (auto *parSchedPtr = std::get_if<ParScheduleable>(&group)) {
+        auto parOp = parSchedPtr->parOp;
+
+        auto calyxParOp = rewriter.create<calyx::ParOp>(parOp.getLoc());
+        LogicalResult res =
+            buildCFGControl(path, rewriter, calyxParOp.getBodyBlock(), block,
+                            &parOp.getRegion().getBlocks().front());
         if (res.failed())
           return res;
       } else if (auto *callSchedPtr = std::get_if<CallScheduleable>(&group)) {
@@ -1755,6 +2008,9 @@ void SCFToCalyxPass::runOnOperation() {
   DenseMap<FuncOp, calyx::ComponentOp> funcMap;
   SmallVector<LoweringPattern, 8> loweringPatterns;
   calyx::PatternApplicationState patternState;
+
+  addOncePattern<BuildParGroups>(loweringPatterns, patternState, funcMap,
+                                 *loweringState);
 
   /// Creates a new Calyx component for each FuncOp in the inpurt module.
   addOncePattern<FuncOpConversion>(loweringPatterns, patternState, funcMap,
