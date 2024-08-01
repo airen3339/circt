@@ -13,6 +13,7 @@
 #ifndef CIRCT_DIALECT_OM_OMOPS_TD
 #define CIRCT_DIALECT_OM_OMOPS_TD
 
+include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "circt/Dialect/OM/OMDialect.td"
 include "circt/Dialect/OM/OMEnums.td"
 include "circt/Dialect/OM/OMOpInterfaces.td"
@@ -33,7 +34,7 @@ class OMOp<string mnemonic, list<Trait> traits = []> :
 
 class OMClassLike<string mnemonic, list<Trait> traits = []> :
   OMOp<mnemonic, traits # [
-    SingleBlock, NoTerminator, Symbol, RegionKindInterface, IsolatedFromAbove,
+    Symbol, RegionKindInterface, IsolatedFromAbove,
     DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmBlockArgumentNames"]>,
     DeclareOpInterfaceMethods<ClassLike>]> {
 
@@ -57,16 +58,17 @@ class OMClassLike<string mnemonic, list<Trait> traits = []> :
   let hasVerifier = 1;
 }
 
-class OMClassFieldLike<string mnemonic, list<Trait> traits = []> :
-  OMOp<mnemonic, traits # [
-    DeclareOpInterfaceMethods<ClassFieldLike>]> {
+class OMClassFieldsLike<string mnemonic, list<Trait> traits = []> :
+  OMOp<mnemonic, traits # [Terminator, ReturnLike, Pure,
+    DeclareOpInterfaceMethods<ClassFieldsLike>]> {
 }
 
 //===----------------------------------------------------------------------===//
 // Class definitions
 //===----------------------------------------------------------------------===//
 
-def ClassOp : OMClassLike<"class"> {
+def ClassOp : OMClassLike<"class", [
+      SingleBlockImplicitTerminator<"ClassFieldsOp">]> {
   let extraClassDeclaration = [{
     mlir::Block *getBodyBlock() { return &getBody().front(); }
     // This builds a ClassOp, and populates it with the CLassFieldOps.
@@ -82,26 +84,33 @@ def ClassOp : OMClassLike<"class"> {
     static mlir::RegionKind getRegionKind(unsigned index) {
       return mlir::RegionKind::Graph;
     }
+
+    llvm::SmallVector<FieldValue> getFieldValues();
+
+    // TODO: Should these use ArrayRef<Field> instead?
+    void addFields(mlir::OpBuilder &builder, mlir::Location loc,
+                   llvm::ArrayRef<mlir::Attribute> fieldNames,
+                   llvm::ArrayRef<mlir::Value> fieldValues);
+
+    void addFields(mlir::OpBuilder &builder,
+                   llvm::ArrayRef<mlir::Location> locs,
+                   llvm::ArrayRef<mlir::Attribute> fieldNames,
+                   llvm::ArrayRef<mlir::Value> fieldValues);
   }];
 }
 
-def ClassFieldOp : OMClassFieldLike<"class.field",
-    [HasParent<"ClassOp">]> {
-  let arguments = (ins
-    SymbolNameAttr:$name,
-    AnyType:$value
-  );
+def ClassFieldsOp : OMClassFieldsLike<"class.fields", [HasParent<"ClassOp">]> {
+  let arguments = (ins Variadic<AnyType>:$fields);
 
-  let assemblyFormat = [{
-    $name `,` $value  attr-dict `:` type($value)
-  }];
+  let assemblyFormat = "attr-dict ($fields^ `:` qualified(type($fields)))?";
 }
 
 //===----------------------------------------------------------------------===//
 // External class definitions
 //===----------------------------------------------------------------------===//
 
-def ClassExternOp : OMClassLike<"class.extern"> {
+def ClassExternOp : OMClassLike<"class.extern", [
+      SingleBlockImplicitTerminator<"ClassExternFieldsOp">]> {
   let extraClassDeclaration = [{
     mlir::Block *getBodyBlock() { return &getBody().front(); }
     
@@ -109,18 +118,22 @@ def ClassExternOp : OMClassLike<"class.extern"> {
     static mlir::RegionKind getRegionKind(unsigned index) {
       return mlir::RegionKind::Graph;
     }
+
+    void addFields(mlir::OpBuilder &builder, mlir::Location loc,
+                   llvm::ArrayRef<mlir::StringAttr> fieldNames,
+                   llvm::ArrayRef<mlir::Type> fieldTypes);
+    void addFields(mlir::OpBuilder &builder, 
+                   llvm::ArrayRef<mlir::Location> locs, 
+                   llvm::ArrayRef<mlir::StringAttr> fieldNames,
+                   llvm::ArrayRef<mlir::Type> fieldTypes);
   }];
 }
 
-def ClassExternFieldOp : OMClassFieldLike<"class.extern.field",
+def ClassExternFieldsOp : OMClassFieldsLike<"class.extern.fields",
     [HasParent<"ClassExternOp">]> {
-  let arguments = (ins
-    SymbolNameAttr:$name,
-    TypeAttr:$type
-  );
 
   let assemblyFormat = [{
-    $name attr-dict `:` $type
+    attr-dict
   }];
 }
 

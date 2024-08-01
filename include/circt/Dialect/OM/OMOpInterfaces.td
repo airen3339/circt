@@ -15,6 +15,16 @@
 
 include "mlir/IR/OpBase.td"
 
+def ClassFieldsLike : OpInterface<"ClassFieldsLike"> {
+  let cppNamespace = "circt::om";
+
+  let description = [{
+    Marks the end of a class-like definition by providing a list of accessible
+    fields.
+  }];
+
+}
+
 def ClassLike : OpInterface<"ClassLike"> {
   let cppNamespace = "circt::om";
 
@@ -37,22 +47,29 @@ def ClassLike : OpInterface<"ClassLike"> {
       "mlir::Region &", "getBody", (ins)>,
     InterfaceMethod<"Get the class-like body block",
       "mlir::Block *", "getBodyBlock", (ins),
-      /*methodBody=*/[{ return $_op.getBodyBlock(); }]>
-  ];
-}
-
-def ClassFieldLike : OpInterface<"ClassFieldLike"> {
-  let cppNamespace = "circt::om";
-
-  let description = [{
-    Common functionality for class-like field operations.
-  }];
-
-  let methods = [
-    InterfaceMethod<"Get the class-like field's type",
-      "mlir::Type", "getType", (ins)>,
-    InterfaceMethod<"Get the class-like field's name attribute",
-      "mlir::StringAttr", "getNameAttr", (ins)>
+      /*methodBody=*/[{ return $_op.getBodyBlock(); }]>,
+    InterfaceMethod<"Get the class-like fields op",
+      "circt::om::ClassFieldsLike", "getFieldsOp", (ins)>,
+    InterfaceMethod<"Get the class-like fields objects",
+      "llvm::SmallVector<circt::om::Field>", "getFields", (ins)>,
+    InterfaceMethod<"Get the class-like field to type map",
+      "std::optional<llvm::MapVector<mlir::StringAttr, mlir::Type>>", "getFieldTypes", (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{ 
+        llvm::MapVector<mlir::StringAttr, mlir::Type> classFields;
+        for (auto field : $_op.getFields()) {
+          auto result = classFields.insert(
+            {field.getName(), field.getType()}
+          );
+          /// TODO: Can we do this verification on construction?
+          if (!result.second) {
+            $_op.getFieldsOp().emitOpError() << "field " << field.getName()
+            << " is defined twice";
+            return std::nullopt;
+          }
+        }
+        return std::optional<llvm::MapVector<mlir::StringAttr, mlir::Type>>(classFields);
+      }]>,
   ];
 }
 

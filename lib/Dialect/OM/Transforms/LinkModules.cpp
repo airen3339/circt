@@ -170,9 +170,11 @@ static FailureOr<bool> resolveClasses(StringAttr name,
     return diag;
   };
 
-  llvm::MapVector<StringAttr, Type> classFields;
-  for (auto fieldOp : classOp.getOps<om::ClassFieldOp>())
-    classFields.insert({fieldOp.getNameAttr(), fieldOp.getType()});
+  auto classFieldsOpt = classOp.getFieldTypes();
+  if (!classFieldsOpt.has_value()) {
+    return emitError(classOp) << "failed getting class op field types";
+  }
+  llvm::MapVector<StringAttr, Type> classFields = classFieldsOpt.value();
 
   for (auto op : classes) {
     if (op == classOp)
@@ -193,21 +195,25 @@ static FailureOr<bool> resolveClasses(StringAttr name,
     }
     // Check declared fields.
     llvm::DenseSet<StringAttr> declaredFields;
-    for (auto fieldOp : op.getBodyBlock()->getOps<om::ClassExternFieldOp>()) {
-      auto it = classFields.find(fieldOp.getNameAttr());
+
+    auto fieldTypes = op.getFieldTypes();
+    if (!fieldTypes.has_value()) {
+      return emitError(op) << "failed getting field types";
+    }
+
+    for (auto [name, type] : fieldTypes.value()) {
+      auto *it = classFields.find(name);
 
       // Field not found in its definition.
       if (it == classFields.end())
-        return emitError(op)
-               << "declaration has a field " << fieldOp.getNameAttr()
-               << " but not found in its definition";
+        return emitError(op) << "declaration has a field " << name
+                             << " but not found in its definition";
 
-      if (it->second != fieldOp.getType())
+      if (it->second != type)
         return emitError(op)
-               << "declaration has a field " << fieldOp.getNameAttr()
-               << " but types don't match, " << it->second << " vs "
-               << fieldOp.getType();
-      declaredFields.insert(fieldOp.getNameAttr());
+               << "declaration has a field " << name
+               << " but types don't match, " << it->second << " vs " << type;
+      declaredFields.insert(name);
     }
 
     for (auto [fieldName, _] : classFields)

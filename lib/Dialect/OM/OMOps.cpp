@@ -200,9 +200,15 @@ circt::om::ClassOp circt::om::ClassOp::buildSimpleClassOp(
   Block *body = &classOp.getRegion().emplaceBlock();
   auto prevLoc = odsBuilder.saveInsertionPoint();
   odsBuilder.setInsertionPointToEnd(body);
-  for (auto [name, type] : llvm::zip(fieldNames, fieldTypes))
-    odsBuilder.create<circt::om::ClassFieldOp>(loc, name,
-                                               body->addArgument(type, loc));
+  SmallVector<Value> args =
+      llvm::map_to_vector(fieldTypes, [&](Type type) -> Value {
+        return body->addArgument(type, loc);
+      });
+  SmallVector<Attribute> fields =
+      llvm::map_to_vector(fieldNames, [&](StringRef name) -> Attribute {
+        return StringAttr::get(classOp.getContext(), name);
+      });
+  classOp.addFields(odsBuilder, loc, fields, args);
   odsBuilder.restoreInsertionPoint(prevLoc);
 
   return classOp;
@@ -225,11 +231,50 @@ void circt::om::ClassOp::getAsmBlockArgumentNames(
   getClassLikeAsmBlockArgumentNames(*this, region, setNameFn);
 }
 
-//===----------------------------------------------------------------------===//
-// ClassFieldOp
-//===----------------------------------------------------------------------===//
+ClassFieldsLike circt::om::ClassOp::getFieldsOp() {
+  return cast<ClassFieldsOp>(this->getBodyBlock()->getTerminator());
+}
 
-Type circt::om::ClassFieldOp::getType() { return getValue().getType(); }
+llvm::SmallVector<Field> circt::om::ClassOp::getFields() {
+  // TODO: Can we do this cast without a copy?
+  auto values = this->getFieldValues();
+  return llvm::SmallVector<Field>(values.begin(), values.end());
+}
+
+llvm::SmallVector<FieldValue> circt::om::ClassOp::getFieldValues() {
+  llvm::SmallVector<FieldValue> result;
+  auto fieldsOp = this->getFieldsOp();
+  auto fields = fieldsOp->getOperands();
+  if (fields.empty())
+    return result;
+
+  auto fieldNames = cast<ArrayAttr>(fieldsOp->getAttr("field_names"));
+  assert(fields.size() == fieldNames.size() &&
+         "expected same number of fields and names");
+
+  for (size_t i = 0; i < fields.size(); i++) {
+    auto field = fields[i];
+    result.push_back(FieldValue(cast<StringAttr>(fieldNames[i]), field));
+  }
+
+  return result;
+}
+
+void circt::om::ClassOp::addFields(mlir::OpBuilder &builder, mlir::Location loc,
+                                   llvm::ArrayRef<mlir::Attribute> fieldNames,
+                                   llvm::ArrayRef<mlir::Value> fieldValues) {
+  auto op = builder.create<ClassFieldsOp>(loc, fieldValues);
+  op.getOperation()->setAttr(
+      "field_names", mlir::ArrayAttr::get(this->getContext(), fieldNames));
+}
+
+void circt::om::ClassOp::addFields(mlir::OpBuilder &builder,
+                                   llvm::ArrayRef<mlir::Location> locs,
+                                   llvm::ArrayRef<mlir::Attribute> fieldNames,
+                                   llvm::ArrayRef<mlir::Value> fieldValues) {
+  this->addFields(builder, builder.getFusedLoc(locs), fieldNames, fieldValues);
+}
+
 
 //===----------------------------------------------------------------------===//
 // ClassExternOp
@@ -264,7 +309,7 @@ LogicalResult circt::om::ClassExternOp::verify() {
 
   // Verify that only external class field declarations are present in the body.
   for (auto &op : getOps())
-    if (!isa<ClassExternFieldOp>(op))
+    if (!isa<ClassExternFieldsOp>(op))
       return op.emitOpError("not allowed in external class");
 
   return success();
@@ -273,6 +318,38 @@ LogicalResult circt::om::ClassExternOp::verify() {
 void circt::om::ClassExternOp::getAsmBlockArgumentNames(
     Region &region, OpAsmSetValueNameFn setNameFn) {
   getClassLikeAsmBlockArgumentNames(*this, region, setNameFn);
+}
+
+ClassFieldsLike circt::om::ClassExternOp::getFieldsOp() {
+  return cast<ClassExternFieldsOp>(this->getBodyBlock()->getTerminator());
+}
+
+llvm::SmallVector<Field> circt::om::ClassExternOp::getFields() {
+  llvm::SmallVector<Field> result;
+  auto fieldsOp = this->getFieldsOp();
+  for (auto field : fieldsOp->getAttrs()) {
+    result.push_back(Field(field.getName(), fieldsOp.getLoc(),
+                           cast<TypeAttr>(field.getValue()).getValue()));
+  }
+  return result;
+}
+
+void circt::om::ClassExternOp::addFields(
+    mlir::OpBuilder &builder, mlir::Location loc,
+    llvm::ArrayRef<mlir::StringAttr> fieldNames,
+    llvm::ArrayRef<mlir::Type> fieldTypes) {
+  llvm::SmallVector<NamedAttribute> fieldAttrs;
+  auto *op = builder.create<ClassExternFieldsOp>(loc).getOperation();
+  for (auto [name, type] : llvm::zip(fieldNames, fieldTypes)) {
+    op->setAttr(name, mlir::TypeAttr::get(type));
+  }
+}
+
+void circt::om::ClassExternOp::addFields(
+    mlir::OpBuilder &builder, llvm::ArrayRef<mlir::Location> locs,
+    llvm::ArrayRef<mlir::StringAttr> fieldNames,
+    llvm::ArrayRef<mlir::Type> fieldTypes) {
+  this->addFields(builder, builder.getFusedLoc(locs), fieldNames, fieldTypes);
 }
 
 //===----------------------------------------------------------------------===//
