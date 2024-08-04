@@ -1058,7 +1058,7 @@ module Expressions;
     // CHECK: [[TMP2:%.+]] = moore.struct_extract [[TMP1]], "b" : struct<{a: i32, b: i32}> -> i32
     // CHECK: moore.blocking_assign %b, [[TMP2]]
     b = struct0.b;
- 
+
     //===------------------------------------------------------------------===//
     // Builtin Functions
 

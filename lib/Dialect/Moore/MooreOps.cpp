@@ -16,11 +16,12 @@
 #include "circt/Support/CustomDirectiveImpl.h"
 #include "mlir/IR/Builders.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/ADT/TypeSwitch.h"
 
 using namespace circt;
 using namespace circt::moore;
 using namespace mlir;
+
+static ArrayRef<StructLikeMember> getStructMembers(Type type);
 
 //===----------------------------------------------------------------------===//
 // SVModuleOp
@@ -289,6 +290,37 @@ VariableOp::handlePromotionComplete(const MemorySlot &slot, Value defaultValue,
 
 LogicalResult VariableOp::canonicalize(VariableOp op,
                                        ::mlir::PatternRewriter &rewriter) {
+  if (!(isa<SVModuleOp>(op->getParentOp()) ||
+        isa<func::FuncOp>(op->getParentOp())))
+    return failure();
+  auto members = getStructMembers(op.getType().getNestedType());
+  if (!members.empty()) {
+    SmallVector<Value> createFields;
+    if (auto initial = op.getInitial()) {
+      auto addressOp = rewriter.create<AddressOp>(
+          op.getLoc(), RefType::get(cast<UnpackedType>(initial.getType())),
+          initial);
+      for (const auto &member : members) {
+        auto field = rewriter.create<StructExtractOp>(
+            op->getLoc(), cast<UnpackedType>(member.type), member.name,
+            addressOp);
+        createFields.push_back(field);
+      }
+    } else {
+      for (const auto &member : members) {
+        // todo: support 4-domain value
+        auto field = rewriter.create<ConstantOp>(op->getLoc(),
+                                                 cast<IntType>(member.type), 0);
+        createFields.push_back(field);
+      }
+    }
+    auto value = rewriter.create<StructCreateOp>(
+        op->getLoc(), op.getType().getNestedType(), createFields);
+    rewriter.replaceOpWithNewOp<AddressOp>(op, RefType::get(value.getType()),
+                                           value);
+    return success();
+  }
+
   Value initial;
   for (auto *user : op->getUsers())
     if (isa<ContinuousAssignOp>(user) &&
@@ -521,7 +553,11 @@ static std::optional<uint32_t> getStructFieldIndex(Type type, StringAttr name) {
     return structType.getFieldIndex(name);
   if (auto structType = dyn_cast<UnpackedStructType>(type))
     return structType.getFieldIndex(name);
-  assert(0 && "expected StructType or UnpackedStructType");
+  if (auto unionType = dyn_cast<UnionType>(type))
+    return unionType.getFieldIndex(name);
+  if (auto unionType = dyn_cast<UnpackedUnionType>(type))
+    return unionType.getFieldIndex(name);
+  assert(0 && "expected Struct-Like Type");
   return {};
 }
 
@@ -530,7 +566,10 @@ static ArrayRef<StructLikeMember> getStructMembers(Type type) {
     return structType.getMembers();
   if (auto structType = dyn_cast<UnpackedStructType>(type))
     return structType.getMembers();
-  assert(0 && "expected StructType or UnpackedStructType");
+  if (auto unionType = dyn_cast<UnionType>(type))
+    return unionType.getMembers();
+  if (auto unionType = dyn_cast<UnpackedUnionType>(type))
+    return unionType.getMembers();
   return {};
 }
 
@@ -678,6 +717,9 @@ OpFoldResult StructInjectOp::fold(FoldAdaptor adaptor) {
 
 LogicalResult StructInjectOp::canonicalize(StructInjectOp op,
                                            PatternRewriter &rewriter) {
+  if (!(isa<SVModuleOp>(op->getParentOp()) ||
+        isa<func::FuncOp>(op->getParentOp())))
+    return failure();
   auto members = getStructMembers(op.getType());
 
   // Chase a chain of `struct_inject` ops, with an optional final
@@ -725,23 +767,18 @@ LogicalResult StructInjectOp::canonicalize(StructInjectOp op,
 //===----------------------------------------------------------------------===//
 
 LogicalResult UnionCreateOp::verify() {
-  /// checks if the types of the input is exactly equal to the union field
+  auto type = getStructFieldType(getType(), getFieldNameAttr());
+
+  /// checks if the type of the input is exactly equal to the union field
   /// type
-  return TypeSwitch<Type, LogicalResult>(getType())
-      .Case<UnionType, UnpackedUnionType>([this](auto &type) {
-        auto members = type.getMembers();
-        auto resultType = getType();
-        auto fieldName = getFieldName();
-        for (const auto &member : members)
-          if (member.name == fieldName && member.type == resultType)
-            return success();
-        emitOpError("input type must match the union field type");
-        return failure();
-      })
-      .Default([this](auto &) {
-        emitOpError("input type must be UnionType or UnpackedUnionType");
-        return failure();
-      });
+
+  if (!type)
+    return emitOpError() << "union field " << getFieldNameAttr()
+                         << " which does not exist in " << getInput().getType();
+  if (type != getType())
+    return emitOpError() << "result type " << getType()
+                         << " must match union field type " << type;
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -749,47 +786,35 @@ LogicalResult UnionCreateOp::verify() {
 //===----------------------------------------------------------------------===//
 
 LogicalResult UnionExtractOp::verify() {
-  /// checks if the types of the input is exactly equal to the one of the
-  /// types of the result union fields
-  return TypeSwitch<Type, LogicalResult>(getInput().getType())
-      .Case<UnionType, UnpackedUnionType>([this](auto &type) {
-        auto members = type.getMembers();
-        auto fieldName = getFieldName();
-        auto resultType = getType();
-        for (const auto &member : members)
-          if (member.name == fieldName && member.type == resultType)
-            return success();
-        emitOpError("result type must match the union field type");
-        return failure();
-      })
-      .Default([this](auto &) {
-        emitOpError("input type must be UnionType or UnpackedUnionType");
-        return failure();
-      });
+  auto type = getStructFieldType(getInput().getType(), getFieldNameAttr());
+
+  /// checks if the type of the input is exactly equal to the type of the result
+  /// union fields
+  if (!type)
+    return emitOpError() << "union field " << getFieldNameAttr()
+                         << " which does not exist in " << getInput().getType();
+  if (type != getType())
+    return emitOpError() << "result type " << getType()
+                         << " must match union field type " << type;
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
-// UnionExtractOp
+// UnionExtractRefOp
 //===----------------------------------------------------------------------===//
 
 LogicalResult UnionExtractRefOp::verify() {
-  /// checks if the types of the result is exactly equal to the type of the
-  /// refe union field
-  return TypeSwitch<Type, LogicalResult>(getInput().getType().getNestedType())
-      .Case<UnionType, UnpackedUnionType>([this](auto &type) {
-        auto members = type.getMembers();
-        auto fieldName = getFieldName();
-        auto resultType = getType().getNestedType();
-        for (const auto &member : members)
-          if (member.name == fieldName && member.type == resultType)
-            return success();
-        emitOpError("result type must match the union field type");
-        return failure();
-      })
-      .Default([this](auto &) {
-        emitOpError("input type must be UnionType or UnpackedUnionType");
-        return failure();
-      });
+  auto type = getStructFieldType(getInput().getType().getNestedType(),
+                                 getFieldNameAttr());
+  /// checks if the type of the result is exactly equal to the type of the
+  /// referring union field
+  if (!type)
+    return emitOpError() << "union field " << getFieldNameAttr()
+                         << " which does not exist in " << getInput().getType();
+  if (type != getType())
+    return emitOpError() << "result type " << getType()
+                         << " must match union field type " << type;
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -874,6 +899,35 @@ DeletionKind BlockingAssignOp::removeBlockingUses(
   return DeletionKind::Delete;
 }
 
+LogicalResult BlockingAssignOp::canonicalize(BlockingAssignOp op,
+                                             PatternRewriter &rewriter) {
+  if (!(isa<SVModuleOp>(op->getParentOp()) ||
+        isa<func::FuncOp>(op->getParentOp())))
+    return failure();
+  if (auto refOp = op.getDst().getDefiningOp<moore::StructExtractRefOp>()) {
+    auto input = refOp.getInput();
+    if (isa<SVModuleOp>(input.getDefiningOp()->getParentOp())) {
+      auto value = rewriter.create<ReadOp>(
+          op->getLoc(), cast<RefType>(input.getType()).getNestedType(), input);
+      auto newOp = rewriter.create<moore::StructInjectOp>(
+          op->getLoc(), value.getType(), value, refOp.getFieldNameAttr(),
+          op.getSrc());
+      auto newOpAddress = rewriter.create<moore::AddressOp>(
+          op.getLoc(), RefType::get(newOp.getType()), newOp);
+      rewriter.replaceOpUsesWithIf(
+          input.getDefiningOp(), newOpAddress->getResults(),
+          [&op](OpOperand &operand) {
+            return !operand.getOwner()->isBeforeInBlock(op);
+          });
+      op.getDstMutable();
+      op.erase();
+      refOp.erase();
+      return success();
+    }
+  }
+  return failure();
+}
+
 //===----------------------------------------------------------------------===//
 // ReadOp
 //===----------------------------------------------------------------------===//
@@ -908,6 +962,19 @@ ReadOp::removeBlockingUses(const MemorySlot &slot,
                            const DataLayout &dataLayout) {
   getResult().replaceAllUsesWith(reachingDefinition);
   return DeletionKind::Delete;
+}
+
+LogicalResult ReadOp::canonicalize(ReadOp op, PatternRewriter &rewriter) {
+  if (!(isa<SVModuleOp>(op->getParentOp()) ||
+        isa<func::FuncOp>(op->getParentOp())))
+    return failure();
+  if (auto addr = op.getInput().getDefiningOp<AddressOp>()) {
+    auto value = addr.getInput();
+    op.replaceAllUsesWith(value);
+    op.erase();
+    return success();
+  }
+  return failure();
 }
 
 //===----------------------------------------------------------------------===//
