@@ -93,7 +93,8 @@ void SimplifyProceduresPass::runOnOperation() {
               localVarOp.getResult());
           builder.create<BlockingAssignOp>(
               nestedOp.getLoc(),
-              localVarOp.getInitial().getDefiningOp()->getOperand(0), readOp);
+              localVarOp.getInitial().getDefiningOp()->getOperand(0), readOp,
+              Value{});
           builder.clearInsertionPoint();
           assignOps.erase(assignOp);
         }
